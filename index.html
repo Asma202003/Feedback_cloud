@@ -306,27 +306,47 @@
             starsContainer.appendChild(star);
         }
 
-        // Persistent Storage Wrapper
+        // Storage with fallback to BroadcastChannel
+        const inMemoryStore = {};
+        const channel = new BroadcastChannel('wordcloud_sync');
+        
         const storage = {
             async get(key, shared = false) {
                 try {
                     if (window.storage && window.storage.get) {
-                        return await window.storage.get(key, shared);
+                        const result = await window.storage.get(key, shared);
+                        return result;
                     }
-                    return null;
                 } catch (e) {
-                    return null;
+                    console.log('Storage API unavailable, using fallback');
                 }
+                // Fallback to in-memory
+                const value = inMemoryStore[key];
+                return value ? { key, value, shared } : null;
             },
             
             async set(key, value, shared = false) {
                 try {
                     if (window.storage && window.storage.set) {
-                        return await window.storage.set(key, value, shared);
+                        const result = await window.storage.set(key, value, shared);
+                        if (result) return result;
                     }
-                    return null;
                 } catch (e) {
-                    return null;
+                    console.log('Storage API unavailable, using fallback');
+                }
+                // Fallback to in-memory
+                inMemoryStore[key] = value;
+                channel.postMessage({ type: 'update', key, value });
+                return { key, value, shared };
+            }
+        };
+        
+        // Listen for updates from other tabs
+        channel.onmessage = (e) => {
+            if (e.data.type === 'update') {
+                inMemoryStore[e.data.key] = e.data.value;
+                if (app.sessionId && (app.mode === 'host' || app.mode === 'audience')) {
+                    loadWords();
                 }
             }
         };
@@ -414,27 +434,33 @@
                 return;
             }
             
-            const result = await storage.get(`session_${clean}`, true);
-            if (result && result.value) {
-                const data = JSON.parse(result.value);
-                data.participants++;
-                data.liveUsers = (data.liveUsers || 0) + 1;
-                await storage.set(`session_${clean}`, JSON.stringify(data), true);
+            try {
+                const result = await storage.get(`session_${clean}`, true);
                 
-                app.mode = 'audience';
-                app.sessionId = clean;
-                app.sessionName = data.sessionName || 'Word Cloud';
-                app.words = data.words || [];
-                app.participants = data.participants;
-                app.liveUsers = data.liveUsers;
-                app.isSubmitted = false;
-                
-                notify('✨ Connected Successfully');
-                sound(900, 100);
-                startPoll();
-                render();
-            } else {
-                notify('❌ Session Not Found');
+                if (result && result.value) {
+                    const data = JSON.parse(result.value);
+                    data.participants++;
+                    data.liveUsers = (data.liveUsers || 0) + 1;
+                    await storage.set(`session_${clean}`, JSON.stringify(data), true);
+                    
+                    app.mode = 'audience';
+                    app.sessionId = clean;
+                    app.sessionName = data.sessionName || 'Word Cloud';
+                    app.words = data.words || [];
+                    app.participants = data.participants;
+                    app.liveUsers = data.liveUsers;
+                    app.isSubmitted = false;
+                    
+                    notify('✨ Connected Successfully');
+                    sound(900, 100);
+                    startPoll();
+                    render();
+                } else {
+                    notify('❌ Session Not Found - Please check the code');
+                }
+            } catch (error) {
+                console.error('Join error:', error);
+                notify('❌ Session Not Found - Key does not exist');
             }
         }
 
