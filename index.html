@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Interactive Word Cloud - TCS Theme</title>
+    <title>Interactive Word Cloud - Excel Storage</title>
     <style>
         * {
             margin: 0;
@@ -281,6 +281,18 @@
             display: inline-block;
         }
 
+        .excel-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(0, 217, 255, 0.1);
+            padding: 8px 16px;
+            border-radius: 8px;
+            border: 1px solid rgba(0, 217, 255, 0.3);
+            font-size: 14px;
+            margin-top: 10px;
+        }
+
         @media (max-width: 768px) {
             .hero-title { font-size: 36px; }
             .session-id { font-size: 20px; letter-spacing: 4px; }
@@ -292,6 +304,7 @@
     <div class="stars" id="stars"></div>
     <div id="app"></div>
 
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <script>
         // Create stars background
         const starsContainer = document.getElementById('stars');
@@ -306,10 +319,7 @@
             starsContainer.appendChild(star);
         }
 
-        // Storage with fallback to BroadcastChannel
-        const inMemoryStore = {};
-        const channel = new BroadcastChannel('wordcloud_sync');
-        
+        // Storage system using Excel format
         const storage = {
             async get(key, shared = false) {
                 try {
@@ -318,36 +328,21 @@
                         return result;
                     }
                 } catch (e) {
-                    console.log('Storage API unavailable, using fallback');
+                    console.log('Storage API unavailable');
                 }
-                // Fallback to in-memory
-                const value = inMemoryStore[key];
-                return value ? { key, value, shared } : null;
+                return null;
             },
             
             async set(key, value, shared = false) {
                 try {
                     if (window.storage && window.storage.set) {
                         const result = await window.storage.set(key, value, shared);
-                        if (result) return result;
+                        return result;
                     }
                 } catch (e) {
-                    console.log('Storage API unavailable, using fallback');
+                    console.log('Storage API unavailable');
                 }
-                // Fallback to in-memory
-                inMemoryStore[key] = value;
-                channel.postMessage({ type: 'update', key, value });
-                return { key, value, shared };
-            }
-        };
-        
-        // Listen for updates from other tabs
-        channel.onmessage = (e) => {
-            if (e.data.type === 'update') {
-                inMemoryStore[e.data.key] = e.data.value;
-                if (app.sessionId && (app.mode === 'host' || app.mode === 'audience')) {
-                    loadWords();
-                }
+                return null;
             }
         };
 
@@ -362,7 +357,8 @@
             summary: '',
             isGenerating: false,
             isSubmitted: false,
-            pollInterval: null
+            pollInterval: null,
+            lastExcelUpdate: null
         };
 
         // Utility Functions
@@ -399,20 +395,159 @@
             } catch(e) {}
         }
 
+        // Excel Storage Functions
+        async function saveToExcel() {
+            if (!app.sessionId || app.words.length === 0) return;
+
+            // Prepare data for Excel
+            const submissionData = app.words.map((w, idx) => ({
+                'Entry #': idx + 1,
+                'Word': w.text,
+                'Timestamp': new Date(w.timestamp).toLocaleString(),
+                'Date': new Date(w.timestamp).toLocaleDateString(),
+                'Time': new Date(w.timestamp).toLocaleTimeString(),
+                'Submission ID': w.id
+            }));
+
+            // Calculate frequency
+            const freq = {};
+            app.words.forEach(w => freq[w.text] = (freq[w.text] || 0) + 1);
+            const freqData = Object.entries(freq)
+                .sort((a, b) => b[1] - a[1])
+                .map(([word, count], idx) => ({
+                    'Rank': idx + 1,
+                    'Word': word,
+                    'Count': count,
+                    'Percentage': ((count / app.words.length) * 100).toFixed(1) + '%'
+                }));
+
+            // Session info
+            const sessionInfo = [
+                ['Session Name', app.sessionName],
+                ['Session ID', app.sessionId],
+                ['Created', new Date(app.words[0]?.timestamp || Date.now()).toLocaleString()],
+                ['Last Updated', new Date().toLocaleString()],
+                ['Total Submissions', app.words.length],
+                ['Unique Words', Object.keys(freq).length],
+                ['Total Participants', app.participants],
+                ['Live Users', app.liveUsers]
+            ];
+
+            // Create workbook
+            const wb = XLSX.utils.book_new();
+
+            // Sheet 1: Session Info
+            const infoWS = XLSX.utils.aoa_to_sheet(sessionInfo);
+            infoWS['!cols'] = [{ width: 20 }, { width: 30 }];
+            XLSX.utils.book_append_sheet(wb, infoWS, 'Session Info');
+
+            // Sheet 2: All Submissions
+            const submissionsWS = XLSX.utils.json_to_sheet(submissionData);
+            submissionsWS['!cols'] = [
+                { width: 10 }, // Entry #
+                { width: 25 }, // Word
+                { width: 22 }, // Timestamp
+                { width: 15 }, // Date
+                { width: 15 }, // Time
+                { width: 20 }  // Submission ID
+            ];
+            XLSX.utils.book_append_sheet(wb, submissionsWS, 'All Submissions');
+
+            // Sheet 3: Word Frequency
+            const freqWS = XLSX.utils.json_to_sheet(freqData);
+            freqWS['!cols'] = [
+                { width: 8 },  // Rank
+                { width: 25 }, // Word
+                { width: 10 }, // Count
+                { width: 12 }  // Percentage
+            ];
+            XLSX.utils.book_append_sheet(wb, freqWS, 'Word Frequency');
+
+            // Sheet 4: AI Analysis (if available)
+            if (app.summary) {
+                const analysisData = [
+                    ['AI Analysis Generated', new Date().toLocaleString()],
+                    [''],
+                    ['Insights', app.summary]
+                ];
+                const analysisWS = XLSX.utils.aoa_to_sheet(analysisData);
+                analysisWS['!cols'] = [{ width: 20 }, { width: 100 }];
+                XLSX.utils.book_append_sheet(wb, analysisWS, 'AI Analysis');
+            }
+
+            // Convert to base64 for storage
+            const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' });
+            
+            // Store in persistent storage
+            await storage.set(`excel_${app.sessionId}`, wbout, true);
+            
+            app.lastExcelUpdate = new Date().toLocaleTimeString();
+            return wbout;
+        }
+
+        async function downloadExcel() {
+            const excelData = await saveToExcel();
+            if (!excelData) {
+                notify('❌ No data to export');
+                return;
+            }
+
+            // Convert base64 to blob and download
+            const byteCharacters = atob(excelData);
+            const byteNumbers = new Array(byteCharacters.length);
+            for (let i = 0; i < byteCharacters.length; i++) {
+                byteNumbers[i] = byteCharacters.charCodeAt(i);
+            }
+            const byteArray = new Uint8Array(byteNumbers);
+            const blob = new Blob([byteArray], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+            
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `WordCloud_${app.sessionId}_${new Date().toISOString().split('T')[0]}.xlsx`;
+            a.click();
+            URL.revokeObjectURL(url);
+            
+            notify('📊 Excel file downloaded');
+            sound(900, 120);
+        }
+
+        async function loadFromExcel() {
+            if (!app.sessionId) return;
+            
+            const result = await storage.get(`excel_${app.sessionId}`, true);
+            if (result && result.value) {
+                try {
+                    // Read workbook from base64
+                    const wb = XLSX.read(result.value, { type: 'base64' });
+                    const submissionsSheet = wb.Sheets['All Submissions'];
+                    
+                    if (submissionsSheet) {
+                        const data = XLSX.utils.sheet_to_json(submissionsSheet);
+                        app.words = data.map(row => ({
+                            text: row['Word'],
+                            timestamp: new Date(row['Timestamp']).getTime(),
+                            id: row['Submission ID']
+                        }));
+                        
+                        // Get session info
+                        const infoSheet = wb.Sheets['Session Info'];
+                        const infoData = XLSX.utils.sheet_to_json(infoSheet, { header: 1 });
+                        app.participants = parseInt(infoData[6][1]) || 0;
+                        app.liveUsers = parseInt(infoData[7][1]) || 0;
+                        
+                        render();
+                    }
+                } catch (e) {
+                    console.error('Error loading Excel:', e);
+                }
+            }
+        }
+
         // Core Functions
         async function createSession() {
             const name = prompt('Enter session name:') || 'Word Cloud Session';
             const id = Math.random().toString(36).substr(2, 6).toUpperCase();
-            
-            const sessionData = {
-                words: [],
-                participants: 0,
-                liveUsers: 1,
-                sessionName: name,
-                createdAt: Date.now()
-            };
-            
-            await storage.set(`session_${id}`, JSON.stringify(sessionData), true);
             
             app.mode = 'host';
             app.sessionId = id;
@@ -420,6 +555,9 @@
             app.words = [];
             app.participants = 0;
             app.liveUsers = 1;
+            
+            // Initialize Excel storage
+            await saveToExcel();
             
             notify(`✨ Session Created: ${id}`);
             sound(800, 150);
@@ -435,66 +573,52 @@
             }
             
             try {
-                const result = await storage.get(`session_${clean}`, true);
+                app.sessionId = clean;
+                await loadFromExcel();
                 
-                if (result && result.value) {
-                    const data = JSON.parse(result.value);
-                    data.participants++;
-                    data.liveUsers = (data.liveUsers || 0) + 1;
-                    await storage.set(`session_${clean}`, JSON.stringify(data), true);
-                    
+                if (app.words.length > 0 || app.sessionName) {
                     app.mode = 'audience';
-                    app.sessionId = clean;
-                    app.sessionName = data.sessionName || 'Word Cloud';
-                    app.words = data.words || [];
-                    app.participants = data.participants;
-                    app.liveUsers = data.liveUsers;
+                    app.participants++;
+                    app.liveUsers++;
                     app.isSubmitted = false;
+                    
+                    await saveToExcel();
                     
                     notify('✨ Connected Successfully');
                     sound(900, 100);
                     startPoll();
                     render();
                 } else {
-                    notify('❌ Session Not Found - Please check the code');
+                    notify('❌ Session Not Found');
+                    app.sessionId = '';
                 }
             } catch (error) {
                 console.error('Join error:', error);
-                notify('❌ Session Not Found - Key does not exist');
+                notify('❌ Session Not Found');
+                app.sessionId = '';
             }
         }
 
         async function submitWord(word) {
             if (!word || !app.sessionId) return;
             
-            const result = await storage.get(`session_${app.sessionId}`, true);
-            const data = result && result.value ? JSON.parse(result.value) : { words: [], participants: 0 };
-            
-            data.words.push({
+            app.words.push({
                 text: word.toLowerCase(),
                 timestamp: Date.now(),
-                id: Math.random().toString(36)
+                id: Math.random().toString(36).substr(2, 9)
             });
             
-            await storage.set(`session_${app.sessionId}`, JSON.stringify(data), true);
+            // Save to Excel immediately
+            await saveToExcel();
             
             app.isSubmitted = true;
-            notify('✨ Word Submitted');
+            notify('✨ Word Submitted & Saved to Excel');
             sound(1000, 120);
-            await loadWords();
             render();
         }
 
         async function loadWords() {
-            if (!app.sessionId) return;
-            const result = await storage.get(`session_${app.sessionId}`, true);
-            if (result && result.value) {
-                const data = JSON.parse(result.value);
-                app.words = data.words || [];
-                app.participants = data.participants || 0;
-                app.liveUsers = data.liveUsers || 0;
-                render();
-            }
+            await loadFromExcel();
         }
 
         function startPoll() {
@@ -545,7 +669,11 @@
                 const data = await res.json();
                 if (data.content && data.content[0]) {
                     app.summary = data.content[0].text;
-                    notify('✨ AI Analysis Complete');
+                    
+                    // Save AI analysis to Excel
+                    await saveToExcel();
+                    
+                    notify('✨ AI Analysis Complete & Saved');
                     sound(1200, 150);
                     setTimeout(() => speak(app.summary), 500);
                 } else {
@@ -564,16 +692,11 @@
         async function resetSession() {
             if (!confirm('Clear all words? This cannot be undone.')) return;
             
-            const result = await storage.get(`session_${app.sessionId}`, true);
-            if (result && result.value) {
-                const data = JSON.parse(result.value);
-                data.words = [];
-                await storage.set(`session_${app.sessionId}`, JSON.stringify(data), true);
-                app.words = [];
-                app.summary = '';
-                notify('🗑️ Session Cleared');
-                render();
-            }
+            app.words = [];
+            app.summary = '';
+            await saveToExcel();
+            notify('🗑️ Session Cleared');
+            render();
         }
 
         function copy(text) {
@@ -581,31 +704,6 @@
                 notify('📋 Copied to Clipboard');
                 sound(700, 80);
             });
-        }
-
-        function exportData() {
-            const freq = {};
-            app.words.forEach(w => freq[w.text] = (freq[w.text] || 0) + 1);
-            
-            const exp = {
-                sessionName: app.sessionName,
-                sessionId: app.sessionId,
-                totalWords: app.words.length,
-                uniqueWords: Object.keys(freq).length,
-                participants: app.participants,
-                wordFrequency: freq,
-                summary: app.summary,
-                timestamp: new Date().toISOString()
-            };
-            
-            const blob = new Blob([JSON.stringify(exp, null, 2)], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `wordcloud-${app.sessionId}-${Date.now()}.json`;
-            a.click();
-            URL.revokeObjectURL(url);
-            notify('📥 Data Exported');
         }
 
         // Render Function
@@ -616,10 +714,13 @@
                 root.innerHTML = `
                     <div class="screen">
                         <div style="max-width: 900px; text-align: center;">
-                            <div style="font-size: 80px; margin-bottom: 20px;">✨</div>
+                            <div style="font-size: 80px; margin-bottom: 20px;">📊</div>
                             <h1 class="hero-title">Interactive Word Cloud</h1>
-                            <p style="color: rgba(255,255,255,0.5); font-size: 18px; margin-bottom: 50px; text-transform: uppercase; letter-spacing: 2px;">
+                            <p style="color: rgba(255,255,255,0.5); font-size: 18px; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 2px;">
                                 Real-Time Audience Engagement Platform
+                            </p>
+                            <p style="color: rgba(0, 217, 255, 0.7); font-size: 14px; margin-bottom: 50px;">
+                                ✨ All data automatically saved to Excel
                             </p>
                             
                             <div class="grid-2">
@@ -679,11 +780,16 @@
                                     <div class="live-indicator">
                                         <span style="color: #00d9ff;">👥 ${app.liveUsers} Online</span>
                                     </div>
+                                    ${app.lastExcelUpdate ? `
+                                    <div class="live-indicator">
+                                        <span style="color: #00d9ff;">📊 Last saved: ${app.lastExcelUpdate}</span>
+                                    </div>
+                                    ` : ''}
                                 </div>
                             </div>
                             <div style="display: flex; gap: 10px; flex-wrap: wrap;">
                                 <button class="btn btn-secondary" onclick="generateAI()">🤖 AI Analysis</button>
-                                <button class="btn btn-secondary" onclick="exportData()">💾 Export</button>
+                                <button class="btn btn-primary" onclick="downloadExcel()">📊 Download Excel</button>
                                 <button class="btn btn-secondary" onclick="resetSession()">🗑️ Reset</button>
                                 <button class="btn btn-secondary" onclick="stopPoll(); app.mode = 'select'; render();">Exit</button>
                             </div>
@@ -714,6 +820,10 @@
                             <button class="btn btn-primary" style="width: 100%; margin-top: 15px;" onclick="copy('${app.sessionId}')">
                                 📋 Copy Session Code
                             </button>
+                            <div class="excel-indicator" style="width: 100%; justify-content: center;">
+                                <span style="color: #00ff88;">✓</span>
+                                <span style="color: rgba(255,255,255,0.7);">Auto-saving to Excel storage</span>
+                            </div>
                         </div>
                         
                         <div class="card" style="margin-bottom: 25px;">
@@ -785,11 +895,18 @@
                                     <button id="submitBtn" class="btn btn-primary" style="width: 100%;" disabled>
                                         ✉️ Submit Response
                                     </button>
+                                    <div class="excel-indicator" style="width: 100%; justify-content: center;">
+                                        <span style="color: rgba(255,255,255,0.5); font-size: 12px;">Will be saved to Excel automatically</span>
+                                    </div>
                                 ` : `
                                     <div style="text-align: center; padding: 50px 0;">
                                         <div style="font-size: 90px; margin-bottom: 20px;">✓</div>
                                         <h2 style="font-size: 30px; margin-bottom: 15px; color: #00d9ff;">Thank You!</h2>
-                                        <p style="color: rgba(255,255,255,0.5); margin-bottom: 30px; text-transform: uppercase;">Response Recorded</p>
+                                        <p style="color: rgba(255,255,255,0.5); margin-bottom: 15px; text-transform: uppercase;">Response Recorded</p>
+                                        <div class="excel-indicator" style="justify-content: center; margin-bottom: 30px;">
+                                            <span style="color: #00ff88;">✓</span>
+                                            <span style="color: rgba(255,255,255,0.7);">Saved to Excel</span>
+                                        </div>
                                         <button class="btn btn-secondary" onclick="app.isSubmitted = false; render();">
                                             Submit Another
                                         </button>
